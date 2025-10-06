@@ -56,7 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if str(user.id) not in data["users"]:
-        random_id = random.randint(1000, 9999)
+        random_id = random.randint(1, 99999)
         anon_name = f"Аноним#{random_id}"
         data["users"][str(user.id)] = {"username": user.username, "anon_name": anon_name}
         save_data(data)
