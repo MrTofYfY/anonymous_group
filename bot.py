@@ -199,7 +199,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Основной запуск ----------
 def main():
-    TOKEN = "YOUR_BOT_TOKEN"  # <-- вставь сюда свой токен
+    TOKEN = "8349007208:AAE3WNiRhp6xY5jbOb56s2AWl_C_Aab4L0M"  # <-- вставь сюда свой токен
 
     app = Application.builder().token(TOKEN).build()
 
