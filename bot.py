@@ -8,6 +8,8 @@ import threading
 import logging
 import json
 import random
+import os
+import sys
 
 # ---------- Flask для Render ----------
 app_web = Flask('')
@@ -55,8 +57,9 @@ def is_admin(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
+    # Создаём анонимный ник, если нового пользователя
     if str(user.id) not in data["users"]:
-        random_id = random.randint(1, 99999)
+        random_id = random.randint(1000, 9999)
         anon_name = f"Аноним#{random_id}"
         data["users"][str(user.id)] = {"username": user.username, "anon_name": anon_name}
         save_data(data)
@@ -64,8 +67,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(update):
         await admin_panel(update, context)
     else:
+        # Меню для обычных пользователей
+        keyboard = [
+            [InlineKeyboardButton("🗨️ Отправить сообщение", callback_data="send_message")],
+            [InlineKeyboardButton("💖 Поддержать автора", url="https://t.me/mellfreezy_dons")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "👋 Привет! Чтобы отправить сообщение в общий чат, введи команду /send"
+            "👋 Привет! Выбери действие:", reply_markup=reply_markup
         )
 
 # ---------- Команда /admin ----------
@@ -80,12 +89,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📢 Рассылка", callback_data="broadcast")],
         [InlineKeyboardButton("⛔ Бан", callback_data="ban"),
          InlineKeyboardButton("✅ Разбан", callback_data="unban")],
-        [InlineKeyboardButton("🗑 Очистить всех", callback_data="clear")],
+        [InlineKeyboardButton("🗑 Очистить всех", callback_data="clear")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🔧 Админ панель:", reply_markup=reply_markup)
 
-# ---------- Обработчик кнопок ----------
+# ---------- Обработчик кнопок админа ----------
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -173,6 +182,15 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗨️ Введите сообщение для отправки…")
     return SEND_MESSAGE
 
+# ---------- Обработка кнопки меню для пользователей ----------
+async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "send_message":
+        await query.message.reply_text("🗨️ Введите сообщение для отправки…")
+        return SEND_MESSAGE
+
 # ---------- Отправка сообщений ----------
 async def handle_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -197,18 +215,34 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Действие отменено.")
     return ConversationHandler.END
 
-# ---------- Основной запуск ----------
+# ---------- Main ----------
 def main():
-    TOKEN = "8349007208:AAHZgEFldSKSfDUP2RHsKJnzQCpbj3Ex7gI"  # <-- вставь сюда свой токен
+    # читаем токен из переменной окружения (без токена бот не запустится)
+    TOKEN = os.environ.get("YOUR_BOT_TOKEN")
+    if not TOKEN:
+        logging.error("Переменная окружения YOUR_BOT_TOKEN не задана. Установи её и перезапусти.")
+        sys.exit(1)
 
     app = Application.builder().token(TOKEN).build()
+
+    # ConversationHandler для /send всех пользователей (должен идти **перед** обычным MessageHandler)
+    user_conv = ConversationHandler(
+        entry_points=[CommandHandler("send", send_command)],
+        states={
+            SEND_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_send_message)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    )
+    app.add_handler(user_conv)
 
     # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("cancel", cancel))
 
-    # Админ панель
-    app.add_handler(ConversationHandler(
+    # Админ-панель
+    admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_menu_handler)],
         states={
             BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, do_broadcast)],
@@ -216,15 +250,17 @@ def main():
             UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, do_unban)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-    ))
+        allow_reentry=True
+    )
+    app.add_handler(admin_conv)
 
-    # /send
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("send", send_command)],
-        states={SEND_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_send_message)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
+    # Меню для кнопки "Отправить сообщение"
+    app.add_handler(CallbackQueryHandler(user_menu_handler, pattern="send_message"))
 
+    # Обычные сообщения пересылаем всем (должен идти после ConversationHandler)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message))
+
+    # Запуск
     app.run_polling()
 
 if __name__ == "__main__":
