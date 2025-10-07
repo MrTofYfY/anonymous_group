@@ -1,267 +1,147 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, MessageHandler, CommandHandler, CallbackQueryHandler,
-    filters, ContextTypes, ConversationHandler
-)
-from flask import Flask
-import threading
 import logging
-import json
-import random
 import os
-import sys
-
-# ---------- Flask для Render ----------
-app_web = Flask('')
-
-@app_web.route('/')
-def home():
-    return "✅ Telegram бот работает!"
-
-def run_web():
-    app_web.run(host='0.0.0.0', port=10000)
-
-threading.Thread(target=run_web).start()
-
-# ---------- Логирование ----------
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+import threading
+from dotenv import load_dotenv
+from flask import Flask
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
 )
 
-# ---------- Константы ----------
-DATA_FILE = "data.json"
-ADMIN_USERNAME = "mellfreezy"
+# Загружаем переменные окружения (.env)
+load_dotenv()
 
-# ---------- Загрузка данных ----------
-def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"users": {}, "banned": []}
+# Получаем токен из окружения
+TOKEN = os.getenv("YOUR_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ Ошибка: переменная окружения YOUR_BOT_TOKEN не найдена!")
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+# Включаем логирование
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-data = load_data()
+# Flask сервер для Render
+app = Flask(__name__)
 
-# ---------- Состояния ----------
-SEND_MESSAGE, BROADCAST, BAN, UNBAN = range(4)
+@app.route('/')
+def home():
+    return "✅ Бот работает!"
 
-# ---------- Проверка админа ----------
-def is_admin(update: Update) -> bool:
-    return update.effective_user.username == ADMIN_USERNAME
+# --- Основные данные ---
+ADMIN_USERNAME = "@mellfreezy"
+users = set()
+banned_users = set()
+send_mode = {}
 
-# ---------- Команда /start ----------
+# --- Команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    username = f"@{user.username}" if user.username else user.full_name or "Без имени"
 
-    # Создаём анонимный ник, если нового пользователя
-    if str(user.id) not in data["users"]:
-        random_id = random.randint(1000, 9999)
-        anon_name = f"Аноним#{random_id}"
-        data["users"][str(user.id)] = {"username": user.username, "anon_name": anon_name}
-        save_data(data)
-
-    if is_admin(update):
-        await admin_panel(update, context)
-    else:
-        # Меню для обычных пользователей
+    if username not in [b[1] for b in banned_users]:
+        users.add((user.id, username))
         keyboard = [
-            [InlineKeyboardButton("🗨️ Отправить сообщение", callback_data="send_message")],
+            [InlineKeyboardButton("✉️ Отправить сообщение", callback_data="send_message")],
             [InlineKeyboardButton("💖 Поддержать автора", url="https://t.me/mellfreezy_dons")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "👋 Привет! Выбери действие:", reply_markup=reply_markup
+            f"Привет, {username}! 👋\n\nЯ анонимный чат-бот.\nВыбери действие:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+    else:
+        await update.message.reply_text("🚫 Вы заблокированы и не можете использовать бота.")
 
-# ---------- Команда /admin ----------
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        await update.message.reply_text("🚫 У тебя нет доступа.")
-        return
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if f"@{update.effective_user.username}" != ADMIN_USERNAME:
+        return await update.message.reply_text("⛔ Доступ запрещён.")
 
     keyboard = [
-        [InlineKeyboardButton("👥 Пользователи", callback_data="users"),
-         InlineKeyboardButton("🚫 Забаненные", callback_data="banned")],
-        [InlineKeyboardButton("📢 Рассылка", callback_data="broadcast")],
-        [InlineKeyboardButton("⛔ Бан", callback_data="ban"),
-         InlineKeyboardButton("✅ Разбан", callback_data="unban")],
-        [InlineKeyboardButton("🗑 Очистить всех", callback_data="clear")]
+        [InlineKeyboardButton("👥 Пользователи", callback_data="show_users")],
+        [InlineKeyboardButton("🚫 Забаненные пользователи", callback_data="show_banned")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("🔧 Админ панель:", reply_markup=reply_markup)
+    await update.message.reply_text("⚙️ Админ-панель:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ---------- Обработчик кнопок админа ----------
-async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(update):
-        return
-
-    if query.data == "users":
-        if not data["users"]:
-            await query.edit_message_text("❌ Нет пользователей.")
-        else:
-            users_list = "\n".join(
-                [f"@{info['username']} — {info['anon_name']}" for info in data["users"].values()]
-            )
-            await query.edit_message_text(f"👥 Пользователи:\n{users_list}")
-
-    elif query.data == "banned":
-        if not data["banned"]:
-            await query.edit_message_text("✅ Нет забаненных.")
-        else:
-            banned_list = "\n".join(f"@{u}" for u in data["banned"])
-            await query.edit_message_text(f"🚫 Забаненные пользователи:\n{banned_list}")
-
-    elif query.data == "broadcast":
-        await query.edit_message_text("✍️ Введи текст для рассылки:")
-        return BROADCAST
-
-    elif query.data == "ban":
-        await query.edit_message_text("🚫 Введи @username для блокировки:")
-        return BAN
-
-    elif query.data == "unban":
-        await query.edit_message_text("✅ Введи @username для разблокировки:")
-        return UNBAN
-
-    elif query.data == "clear":
-        data["users"].clear()
-        data["banned"].clear()
-        save_data(data)
-        await query.edit_message_text("🗑 Все пользователи удалены.")
-
-    return ConversationHandler.END
-
-# ---------- Рассылка ----------
-async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    for uid, info in data["users"].items():
-        if info["username"] not in data["banned"]:
-            try:
-                await context.bot.send_message(chat_id=int(uid), text=f"📢 {text}")
-            except Exception as e:
-                logging.warning(f"Не удалось отправить {uid}: {e}")
-    await update.message.reply_text("✅ Рассылка завершена.")
-    return ConversationHandler.END
-
-# ---------- Бан ----------
-async def do_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    username = update.message.text.strip().lstrip("@")
-    if username not in data["banned"]:
-        data["banned"].append(username)
-        save_data(data)
-        await update.message.reply_text(f"🚫 Пользователь @{username} заблокирован.")
-    else:
-        await update.message.reply_text("⚠️ Этот пользователь уже в бане.")
-    return ConversationHandler.END
-
-# ---------- Разбан ----------
-async def do_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    username = update.message.text.strip().lstrip("@")
-    if username in data["banned"]:
-        data["banned"].remove(username)
-        save_data(data)
-        await update.message.reply_text(f"✅ Пользователь @{username} разблокирован.")
-    else:
-        await update.message.reply_text("⚠️ Такого пользователя нет в бане.")
-    return ConversationHandler.END
-
-# ---------- Команда /send ----------
 async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.username in data["banned"]:
-        await update.message.reply_text("🚫 Вы заблокированы и не можете отправлять сообщения.")
-        return ConversationHandler.END
-
+    username = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.full_name
+    if username in [b[1] for b in banned_users]:
+        return await update.message.reply_text("🚫 Вы заблокированы.")
+    send_mode[update.effective_user.id] = True
     await update.message.reply_text("🗨️ Введите сообщение для отправки…")
-    return SEND_MESSAGE
 
-# ---------- Обработка кнопки меню для пользователей ----------
-async def user_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Кнопки ---
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user = query.from_user
+    username = f"@{user.username}" if user.username else user.full_name
     await query.answer()
 
     if query.data == "send_message":
+        if username in [b[1] for b in banned_users]:
+            return await query.message.reply_text("🚫 Вы заблокированы.")
+        send_mode[user.id] = True
         await query.message.reply_text("🗨️ Введите сообщение для отправки…")
-        return SEND_MESSAGE
 
-# ---------- Отправка сообщений ----------
-async def handle_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    elif query.data == "show_users":
+        if f"@{user.username}" != ADMIN_USERNAME:
+            return
+        text = "👥 Пользователи:\n" + "\n".join(
+            [name for _, name in users]
+        ) if users else "Пока нет пользователей."
+        await query.message.reply_text(text)
+
+    elif query.data == "show_banned":
+        if f"@{user.username}" != ADMIN_USERNAME:
+            return
+        text = "🚫 Забаненные пользователи:\n" + "\n".join(
+            [name for _, name in banned_users]
+        ) if banned_users else "Нет забаненных."
+        await query.message.reply_text(text)
+
+# --- Обработка сообщений ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    anon_name = data["users"].get(str(user.id), {}).get("anon_name", "Аноним")
-
+    username = f"@{user.username}" if user.username else user.full_name
     text = update.message.text
-    for uid, info in data["users"].items():
-        if info["username"] not in data["banned"] and uid != str(user.id):
-            try:
-                await context.bot.send_message(
-                    chat_id=int(uid),
-                    text=f"💬 {anon_name}: {text}"
-                )
-            except Exception as e:
-                logging.warning(f"Не удалось отправить сообщение {uid}: {e}")
 
-    await update.message.reply_text("✅ Сообщение отправлено!")
-    return ConversationHandler.END
+    if username in [b[1] for b in banned_users]:
+        return await update.message.reply_text("🚫 Вы заблокированы.")
 
-# ---------- Отмена ----------
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Действие отменено.")
-    return ConversationHandler.END
+    if send_mode.get(user.id):
+        send_mode[user.id] = False
+        for uid, uname in users:
+            if uid != user.id and uname not in [b[1] for b in banned_users]:
+                try:
+                    await context.bot.send_message(uid, f"💬 Анонимное сообщение:\n\n{text}")
+                except Exception as e:
+                    logger.warning(f"Ошибка при отправке пользователю {uid}: {e}")
+        await update.message.reply_text("✅ Сообщение отправлено всем!")
+    else:
+        await update.message.reply_text("Используйте /send, чтобы отправить сообщение.")
 
-# ---------- Main ----------
+# --- Запуск бота ---
 def main():
-    # читаем токен из переменной окружения (без токена бот не запустится)
-    TOKEN = os.environ.get("YOUR_BOT_TOKEN")
-    if not TOKEN:
-        logging.error("Переменная окружения YOUR_BOT_TOKEN не задана. Установи её и перезапусти.")
-        sys.exit(1)
+    app_tg = ApplicationBuilder().token(TOKEN).build()
 
-    app = Application.builder().token(TOKEN).build()
+    app_tg.add_handler(CommandHandler("start", start))
+    app_tg.add_handler(CommandHandler("admin", admin))
+    app_tg.add_handler(CommandHandler("send", send_command))
+    app_tg.add_handler(CallbackQueryHandler(button_callback))
+    app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # ConversationHandler для /send всех пользователей (должен идти **перед** обычным MessageHandler)
-    user_conv = ConversationHandler(
-        entry_points=[CommandHandler("send", send_command)],
-        states={
-            SEND_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_send_message)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-    app.add_handler(user_conv)
-
-    # Команды
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("cancel", cancel))
-
-    # Админ-панель
-    admin_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_menu_handler)],
-        states={
-            BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, do_broadcast)],
-            BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, do_ban)],
-            UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, do_unban)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-    app.add_handler(admin_conv)
-
-    # Меню для кнопки "Отправить сообщение"
-    app.add_handler(CallbackQueryHandler(user_menu_handler, pattern="send_message"))
-
-    # Обычные сообщения пересылаем всем (должен идти после ConversationHandler)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message))
-
-    # Запуск
-    app.run_polling()
+    app_tg.run_polling()
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=main).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
